@@ -1,5 +1,6 @@
 #lang racket
 
+;; okay, I'm up to two serious bugs in irregex, I'm giving up on it for now.
 
 (require irregex)
 
@@ -19,11 +20,6 @@
   )
 
 (define lines (regexp-split #px"\n" d))
-
-;gedcom_line:=
-;level + delim + [optional_xref_ID] + tag + [optional_line_value] + terminator
-#;(define gedcom-line
-  `(: ,level ,delim (? ,opt-xref-id) tag (? ,opt-line-value) ,terminator))
 
 ;; a nonzero digit:
 (define nzdigit '(: (/ #\1 #\9)))
@@ -73,11 +69,42 @@
   `(: #\@ alphanum ,pointer-string #\@))
 
 
-
-
 ; xref_ID:= pointer
 
 (define xref-id `(=> xref-id ,pointer))
+
+
+
+;tag:=
+; [ [(0x5F)] + alphanum | tag + alphanum ]
+
+(define tag
+  `(: (? ("_")) (+ alphanum)))
+
+; escape:=
+; (0x40) + (0x23) + escape_text + (0x40)
+(define escape)
+
+; line_item:=
+; [ escape | line_text | escape + delim + line_text ]
+
+(define line-item
+  ;; will this be matched efficiently?
+  `(or ,escape ,line-text (: ,escape ,delim ,line-text)))
+
+
+;line_value:=
+;[ pointer | line_item ]
+
+(define line-value
+  `(or ,pointer ,line-item))
+
+;gedcom_line:=
+;level + delim + [optional_xref_ID] + tag + [optional_line_value] + terminator
+(define gedcom-line
+  `(: ,level ,delim (? ,xref-id) ,tag (? ,line-value)))
+
+
 
 #| this looks like a bug:
 

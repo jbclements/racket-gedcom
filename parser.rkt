@@ -10,6 +10,22 @@
 
 ;; it does successfully parse at least one GED file.
 
+;; top-level notes on spec:
+;; 1) it appears that underscore should be legal in any_char
+;; 2) given the comments in the file, shouldn't \t be moved
+;;    out of other_char and into any_char?
+
+;; these could just be problems with FamilyTree's gedcom:
+;; 1) several tags appear with no line_item, most notably
+;;   "2 CONT ", which seems a very reasonable way to represent
+;;   a blank line in qoted text, but also things like
+;;   "2 DATE ", which might not be legal.
+;; 2) as expected, at signs are used unquoted in many email addresses.
+;; 3) tabs appear in many line_item's. Illegal, right?
+;; 4) There's heavy use of pointers in free text, as in
+;;    "2 CONT : Child:  @I123@". Looking at some of these, it looks like
+;;    these are mostly quoting failures. Ouch.
+
 (define error-bin (box '()))
 (define (parse-error! line message)
   (set-box! error-bin (cons (list line message)
@@ -19,17 +35,26 @@
 (define (errors)
   (sort (unbox error-bin) < #:key first))
 
-;;; hmmm... stopping here now.
+(define (list-with-indices l)
+  (for/list ([i (in-naturals)]
+             [elt (in-list l)])
+    (list i elt)))
+
+(define (pair-with-indices l)
+  (for/list ([i (in-naturals)]
+             [elt (in-list l)])
+    (cons i elt)))
 
 (define lines
   (time
-   (file->lines "/tmp/foo.ged")))
+   ;; more efficient to deforest? not worrying.
+   (list-with-indices (file->lines "/tmp/foo.ged"))))
 
 (printf "this file contains ~v lines.\n"
         (length lines))
 
 (define (blank-line? l)
-  (regexp-match #px"^[[:space:]]*$" l))
+  (regexp-match #px"^[[:space:]]*$" (second l)))
 
 (let ()
   (define blank-line-count
@@ -44,7 +69,7 @@
   (filter (compose not blank-line?) lines))
 
 (define (starts-with-whitespace? l)
-  (regexp-match #px"^[[:space:]]+" l))
+  (regexp-match #px"^[[:space:]]+" (second l)))
 
 (let ()
   (define bad-lines
@@ -61,46 +86,274 @@
     (printf "\nsigh.\n\n")))
 
 (printf "long lines: ~v\n"
-        (count (λ (s) (< 255 (string-length s))) non-blank-lines))
+        (count (λ (l) (< 255 (string-length (second l)))) non-blank-lines))
 
-;; this is not a careful implementation of the grammar specified in the
+;; there's some serious breakage in and around these "Comment" objects.
+;; Specifically, the exported gedcom files aren't quoting these lines the
+;; way they pretty clearly should be. Ugh. They should be repaired with "CONT"
+;; tags, I believe. Separate pass, bleah.
+
+(define (repair-comments lines)
+  (cond
+    [(empty? lines)
+     '()]
+    [else
+     (match lines
+       [(list-rest (list _ (regexp #px"[0-9]{1,2} OBJE"))
+                   (list _ (regexp #px"[0-9]{1,2} FORM Comment"))
+                   (list _ (regexp #px"[0-9]{1,2} DATE"))
+                   (list _ (regexp #px"([0-9]{1,2}) AUTH" (list _ levelstr)))
+                   remainder)
+        (append (take lines 4)
+                (repair-comments/2a (string->number levelstr) "_BOGO" remainder))]
+       [other
+        (cons (first lines)
+              (repair-comments (rest lines)))])]))
+
+;; this line is a member of a block that probably needs levels & tags, sigh.
+;; this is still fragile, you could easily inject a comment with a "0 INDI"
+(define (repair-comments/2a level tag lines)
+  (cond [(empty? lines) '()]
+        [else
+         (define line (first lines))
+         (match (second line)
+           [(regexp #px"^([0-9]{1,2}) (@[^@]+@ )?_?[A-Z]+( |$)" (list _ levelstr _ _))
+            (cond [(< (string->number levelstr) level)
+                   ;; looks like a real line, continue...
+                   (repair-comments lines)]
+                  [else
+                   (error 'repair-comments "probably an error here on line ~v: ~e"
+                          (first line)
+                          (second line))])]
+           [else
+            (define next-level
+              (cond [(equal? tag "CONT") level]
+                    [else (add1 level)]))
+            (cons
+             (list (first line)
+                   (~a level " " tag " " (second line)))
+             (repair-comments/2a next-level "CONT" (rest lines)))])]))
+
+(check-equal?
+ (repair-comments
+  (list-with-indices
+   (regexp-split #px"\n"
+                 #<<|
+1 OBJE
+2 FORM Comment
+2 DATE 5 Dec 2017
+2 AUTH Whitney Rapp
+<a href="/wiki/Wright-17912" title="Wright-17912">Wright-17912</a> an
+d Wright-23327 appear to represent the same person because: same person
+0 @I58@ INDI
+1 NAME Joseph  /Wright/
+|
+                 ))
+  )
+ '((0 "1 OBJE")
+   (1 "2 FORM Comment")
+   (2 "2 DATE 5 Dec 2017")
+   (3 "2 AUTH Whitney Rapp")
+   (4 "2 _BOGO <a href=\"/wiki/Wright-17912\" title=\"Wright-17912\">Wright-17912</a> an")
+   (5 "3 CONT d Wright-23327 appear to represent the same person because: same person")
+   (6 "0 @I58@ INDI")
+   (7 "1 NAME Joseph  /Wright/")))
+
+(define repaired-lines
+  (time (repair-comments non-blank-lines)))
+
+;; okay, we're going to be gluing together strings to make regular expressions.
+;; this is a bad idea, and I'd rather use something like Olin Shivers' SREs, but
+;; I can't currently find a working implementation.
+
+;; also, the number of parens that are required for grouping of "or" blocks means
+;; that the resulting regexp has a freakish number of submatches. Most of them
+;; must be ignored. Ugh.
+
+;; a nonzero digit:
+(define nzdigit "[1-9]")
+
+; delim:= (0x20)
+;; a space
+(define delim " ")
+
+; digit:= [(0x30)-(0x39) ]
+;; a standard digit
+
+;level:=
+;[ digit | digit + digit ]
+;; one or two digits, with 2 digits only second can be zero (side condition stated in text)
+(define level "([0-9]|[1-9][0-9])")
+
+
+; non_at:=
+; [ alpha | digit | otherchar | (0x23) | (0x20 ) ]
+
+;; okay, this is a bit silly; the otherchar definition is contentious,
+;; and it looks non_at reduces to "all printing characters other than @, #, and _
+;; also, this "print" should almost certainly be extended to cover all
+;; unicode printing chars.
+(define non-at "[^@#_[:space:]]")
+
+
+; pointer_char:= [ non_at ]
+(define pointer-char non-at)
+
+; pointer_string:=
+; [ null | pointer_char | pointer_string + pointer_char ]
+
+;; this seems like a long-winded way to write it... the second one is unnecessary?
+
+(define pointer-string
+  (~a pointer-char "*"))
+
+; pointer:=
+; (0x40) + alphanum + pointer_string + (0x40)
+;; at-sign-wrapped string, must be a first char
+;; submatched
+
+(define pointer
+  (~a "@([[:alnum:]]"pointer-string")@"))
+
+
+; xref_ID:= pointer
+
+(define xref-id pointer)
+
+; optional_xref_ID:= xref_ID + delim
+(define opt-xref-id (~a xref-id delim))
+
+
+
+;tag:=
+; [ [(0x5F)] + alphanum | tag + alphanum ]
+
+(define tag
+  "(_?[[:alnum:]]+)")
+
+
+; any_char:=
+; [ alpha | digit | otherchar | (0x23) | (0x20) | (0x40)+(0x40) ]
+
+;; it really looks like this should have included underscore. Hmm..
+;; okay, putting it in there for now. File  a bug report against the spec?
+(define any-char
+  (~a "([^@]|@@)"))
+
+;escape_text:=
+; [ any_char | escape_text + any_char ]
+
+(define escape-text
+  (~a "("any-char")+"))
+
+; escape:=
+; (0x40) + (0x23) + escape_text + (0x40)
+(define escape
+  (~a "@#("escape-text")@"))
+
+;; line_text:= [ any_char | line_text + any_char ]
+(define line-text
+  escape-text)
+
+; line_item:=
+; [ escape | line_text | escape + delim + line_text ]
+
+(define line-item
+  ;; will this be matched efficiently?
+  (~a "("escape delim line-text"|"escape"|"line-text")"))
+
+
+;line_value:=
+;[ pointer | line_item ]
+
+(define line-value
+  (~a "("pointer"|"line-item")"))
+
+(define optional-line-value
+  (~a " " line-value))
+
+;gedcom_line:=
+;level + delim + [optional_xref_ID] + tag + [optional_line_value] + terminator
+(define gedcom-line
+  (pregexp (~a "^" level delim "("opt-xref-id")?" tag "("optional-line-value")?" "$")))
+
+;; should not fail to match....
+(check-equal? (regexp-match gedcom-line "0 HEAD")
+              '("0 HEAD"
+                "0" ;; level
+                #f ;; bogus
+                #f ;; xref name
+                "HEAD" ;; tag
+                 #f ;; delim+line-value
+                 #f ;; line-value
+                 #f #f #f #f #f #f #f #f #f #f #f #f ;; oh dear heaven
+                 ))
+(check-equal? (take (regexp-match gedcom-line "1 SOUR WikiTree.com") 7)
+             '("1 SOUR WikiTree.com"
+               "1" #f #f
+                   "SOUR"
+                   " WikiTree.com"
+                   "WikiTree.com"))
+
+(check-equal? (take (regexp-match gedcom-line "2 TYPE wikitree.page_id") 7)
+              '("2 TYPE wikitree.page_id"
+                "2" #f #f
+                "TYPE"
+                " wikitree.page_id"
+                "wikitree.page_id"))
+
+(check-equal? (take (regexp-match gedcom-line "1 FAMS @F9@") 7)
+              '("1 FAMS @F9@"
+                "1" #f #f
+                "FAMS"
+                " @F9@"
+                "@F9@"))
+(regexp-match gedcom-line "1 FAMS @F9@")
+
+
 
 
 ;; the structure of the given grammar makes it hard to separate parsing
 ;; into a traditional tokenizer/parser format, so this is going to be
 ;; ad-hoc, like every other parser in the world, sigh.
 ;; gedcom_line ::= level + delim +  [optional_xref_ID] + tag + [optional_line_value] + terminator
+;; returns
+;; (U (List Natural 'illegal-line String)
+;;   (List Natural Natural (U String False) String (U String False))
 (define (parse-gedcom-line l)
-  (match l
-    [(regexp #px"^([1-9][0-9]?) (.*)$" (list _ nstr rest))
-     (match rest
-       [(regexp #px"^@([^@]+)@ (.*)$" (list _ ptr rest))
-        (parse-post-ptr nstr ptr rest)]
-       [other
-        (parse-post-ptr nstr #f rest)])]
-    [other (list 'illegal-line l)]))
-
-(define (parse-post-ptr num maybe-ptr rest)
-  (match rest
-    [(regexp #px"^(_?[a-zA-Z0-9]+)(.*)" (list _ tag rest2))
-     (list (string->number num) maybe-ptr tag rest2)]
-    [other
-     (error 'ouch "bad line continuation: ~e"
-            rest)]))
+  (match (second l)
+    [(regexp gedcom-line
+             (list-rest _ levelstr _ maybe-xref-id
+                        tag _ line-text _))
+     (list (first l)
+           (string->number levelstr)
+           maybe-xref-id
+           tag
+           line-text)]
+    [other (list (first l) 'illegal-line (second l))]))
 
 (define parsed-lines
-  (time (map parse-gedcom-line non-blank-lines)))
-
+  (time
+   (map parse-gedcom-line repaired-lines)))
 
 (define (illegal-line? l)
-  (equal? (first l) 'illegal-line))
+  (equal? (second l) 'illegal-line))
 
+(printf "illegal lines: ~v\n"
+        (count illegal-line? parsed-lines))
 
-(define (line-level l)
-  (first l))
+(take (filter illegal-line? parsed-lines) 30)
+(require sugar)
+(frequency-hash (map third
+                     (take (filter illegal-line? parsed-lines)
+                           2000)))
+
+(define (line-number l) (first l))
+
+(define (line-level l) (second l))
 
 ;; represent a gedcom record
-(struct ged-record (opt-ptr tag line-rest subrecords) #:transparent)
+(struct ged-record (line-num opt-ptr tag line-rest subrecords) #:transparent)
 
 ;; given the current level and a list of lines, return
 ;; a list containg a list of parsed lines and a list of unused lines
@@ -122,7 +375,11 @@
             (list '() lines)]
            [(> (line-level f) expected-level)
             ;; ouch, error
-            (error 'jump-to-larger-num)]
+            (error 'jump-to-larger-num
+                   "jump to larger num on line ~v: expected <= ~v, got ~v"
+                   (line-number f)
+                   expected-level
+                   (line-level f))]
            [else
             ;; try to parse sub-records:
             (match-define (list subs new-lines)
@@ -130,7 +387,8 @@
             ;; parse the rest of the records at this level:
             (match-define (list rest-these new-lines-2)
               (record-parser expected-level new-lines))
-            (list (cons (ged-record (second f) (third f) (fourth f) subs)
+            (list (cons (ged-record (line-number f)
+                                    (third f) (fourth f) (fifth f) subs)
                         rest-these)
                   new-lines-2)])]))
 
@@ -145,7 +403,10 @@
                    "should be unreachable" )]
            [else records])]))
 
+
+
 (define example-data
+  (pair-with-indices
 '((0 "I2299" "INDI" "")
   (1 #f "NAME" " Jane  /Unknown/")
   (2 #f "GIVN" " Jane")
@@ -216,9 +477,10 @@
   (illegal-line
    "<a href=\"/wiki/De_Ceredigion-1\" title=\"De Ceredigion-1\">De Ceredigion-1</a>\
  and Rhydderch-16 appear to represent the same person because: I think that these are\
- the same women.")))
+ the same women."))))
 
 (define example-data2
+  (pair-with-indices
 '((0 "I2299" "INDI" "")
   (1 #f "NAME" " Jane  /Unknown/")
   (2 #f "_AKA" " Rhydderch")
@@ -233,36 +495,38 @@
   (2 #f "DATE" " ABBT 1651")
   (2 #f "PLAC" " Allgoch, Llanwenog, Cardiganshire, Wales")
   (1 #f "DEAT" "")
-  ))
+  )))
 
 (define example-data2-result
   (list
    (ged-record
+    0
     "I2299" "INDI" ""
     (list
      (ged-record
+      1
       #f "NAME" " Jane  /Unknown/"
-      (list (ged-record #f "_AKA" " Rhydderch" '())))
+      (list (ged-record 2 #f "_AKA" " Rhydderch" '())))
      (ged-record
+      3
       #f "BIRT" ""
-      (list (ged-record #f "DATE" " ABT 1651" '())
-            (ged-record #f "PLAC" " Alltgoch, Llanwenog, Cardiganshire, Wales" '())))
-     (ged-record #f "DEAT" "" '())))
-   (ged-record
+      (list (ged-record 4 #f "DATE" " ABT 1651" '())
+            (ged-record 5 #f "PLAC" " Alltgoch, Llanwenog, Cardiganshire, Wales" '())))
+     (ged-record 6 #f "DEAT" "" '())))
+   (ged-record 7
     "I3299" "INDI" ""
     (list
-     (ged-record
+     (ged-record 8
       #f "NAME" " Jane  /UnknoXwn/"
-      (list (ged-record #f #"_AKA" " RhyddeXrch" '())))
-     (ged-record
+      (list (ged-record 9 #f #"_AKA" " RhyddeXrch" '())))
+     (ged-record 10
       #f "BIRT" ""
-      (list (ged-record #f "DATE" " ABT 1651" '())
-            (ged-record #f "PLAC" " Alltgoch, Llanwenog, Cardiganshire, Wales" '())))
-     (ged-record #f "DEAT" "" '())))))
+      (list (ged-record 11 #f "DATE" " ABT 1651" '())
+            (ged-record 12 #f "PLAC" " Alltgoch, Llanwenog, Cardiganshire, Wales" '())))
+     (ged-record 13 #f "DEAT" "" '())))))
 
 (check-equal? (first (parse-all-lines example-data2))
               (first example-data2-result))
-
 
 
 
@@ -271,4 +535,10 @@
 
 (check-not-exn (λ () (record-parser 0 example-data)))
 
-#;(define records (parse-records parsed-lines))
+
+(define d (parse-all-lines parsed-lines))
+
+(printf "file contains ~v top-level records\n"
+        (length d))
+
+
