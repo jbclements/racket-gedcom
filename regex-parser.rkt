@@ -1,6 +1,5 @@
 #lang racket
 
-;; okay, I'm up to two serious bugs in irregex, I'm giving up on it for now.
 
 (require irregex)
 
@@ -35,7 +34,7 @@
 ;level:=
 ;[ digit | digit + digit ]
 
-(define level `(=> level (or ,nzdigit (: ,nzdigit ,digit))))
+(define level `(=> level (or ,digit (: ,nzdigit ,digit))))
 
 
 
