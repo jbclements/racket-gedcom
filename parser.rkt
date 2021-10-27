@@ -1,7 +1,6 @@
 #lang racket
 
-(require sugar
-         parsack)
+(require sugar)
 
 ;; this parser is totally incomplete.
 
@@ -10,21 +9,24 @@
 
 ;; it does successfully parse at least one GED file.
 
+;; it uses racket regexps.
+
 ;; top-level notes on spec:
 ;; 1) it appears that underscore should be legal in any_char
 ;; 2) given the comments in the file, shouldn't \t be moved
 ;;    out of other_char and into any_char?
 
 ;; these could just be problems with FamilyTree's gedcom:
-;; 1) several tags appear with no line_item, most notably
-;;   "2 CONT ", which seems a very reasonable way to represent
-;;   a blank line in qoted text, but also things like
-;;   "2 DATE ", which might not be legal.
+;; 1) The "DATE" tag appears with a trailing space but no value, which
+;;    is technically illegal but not a big deal (e.g. "2 DATE ")
 ;; 2) as expected, at signs are used unquoted in many email addresses.
 ;; 3) tabs appear in many line_item's. Illegal, right?
 ;; 4) There's heavy use of pointers in free text, as in
 ;;    "2 CONT : Child:  @I123@". Looking at some of these, it looks like
 ;;    these are mostly quoting failures. Ouch.
+
+;; level 2 notes, wikitree failures:
+;; 1) tags like BIRT and DATE often appear 
 
 (define error-bin (box '()))
 (define (parse-error! line message)
@@ -48,7 +50,7 @@
 (define lines
   (time
    ;; more efficient to deforest? not worrying.
-   (list-with-indices (file->lines "/tmp/foo.ged"))))
+   (list-with-indices (file->lines "/tmp/foo2.ged"))))
 
 (printf "this file contains ~v lines.\n"
         (length lines))
@@ -262,6 +264,10 @@ d Wright-23327 appear to represent the same person because: same person
   ;; will this be matched efficiently?
   (~a "("escape delim line-text"|"escape"|"line-text")"))
 
+;; this is important, to allow replacement of #f with "" later
+;; in line parsing.
+(check-false (regexp-match? line-item ""))
+
 
 ;line_value:=
 ;[ pointer | line_item ]
@@ -276,6 +282,14 @@ d Wright-23327 appear to represent the same person because: same person
 ;level + delim + [optional_xref_ID] + tag + [optional_line_value] + terminator
 (define gedcom-line
   (pregexp (~a "^" level delim "("opt-xref-id")?" tag "("optional-line-value")?" "$")))
+
+;; A line that doesn't match the previous pattern
+;; useful to prevent parsing breakage.
+(define exceptional-gedcom-line
+  (pregexp (~a "^" level delim tag delim "(.*)$")))
+
+
+
 
 ;; should not fail to match....
 (check-equal? (regexp-match gedcom-line "0 HEAD")
@@ -312,41 +326,79 @@ d Wright-23327 appear to represent the same person because: same person
 
 
 
-
 ;; the structure of the given grammar makes it hard to separate parsing
 ;; into a traditional tokenizer/parser format, so this is going to be
 ;; ad-hoc, like every other parser in the world, sigh.
 ;; gedcom_line ::= level + delim +  [optional_xref_ID] + tag + [optional_line_value] + terminator
 ;; returns
-;; (U (List Natural 'illegal-line String)
-;;   (List Natural Natural (U String False) String (U String False))
+;; (U (List Natural 'totally-illegal-line String)
+;;   (List Natural Natural (U String False) String String)
+;;   (List Natural Natural (U String False) String 'partly-illegal-line String))
 (define (parse-gedcom-line l)
-  (match (second l)
+  (define line-num (first l))
+  (define line-content (second l))
+  (match line-content
     [(regexp gedcom-line
+             ;; the "list-rest" is necessary because the regexp
+             ;; requires many extra pairs of parens for grouping,
+             ;; are treated as extra match locations.
              (list-rest _ levelstr _ maybe-xref-id
                         tag _ line-text _))
-     (list (first l)
+     (list line-num ;; useful for error messages...
            (string->number levelstr)
            maybe-xref-id
            tag
-           line-text)]
-    [other (list (first l) 'illegal-line (second l))]))
+           ;; this is not collapsing cases because line-text
+           ;; doesn't match the empty string
+           (or line-text ""))]
+    ;; we get improved parsing and error reporting when we partially parse
+    ;; these illegal lines.
+    [(regexp exceptional-gedcom-line (list _ levelstr tag rest-of-line))
+     (list line-num
+                  (string->number levelstr)
+                  #f
+                  tag
+                  'partly-illegal-line
+                  rest-of-line)]
+    [other (list (first l) 'totally-illegal-line (second l))]))
+
+;; this one is totally legal:
+(check-equal? (parse-gedcom-line (list 1234 "74 CONT"))
+              '(1234 74 #f "CONT" ""))
+;; this one is technically not:
+(check-equal? (parse-gedcom-line (list 1234 "74 CONT "))
+              '(1234 74 #f "CONT" partly-illegal-line ""))
 
 (define parsed-lines
   (time
    (map parse-gedcom-line repaired-lines)))
 
+
+(define (totally-illegal-line? l)
+  (equal? (second l) 'totally-illegal-line))
+
+(printf "totally illegal lines: ~v\n"
+        (count totally-illegal-line? parsed-lines))
+
 (define (illegal-line? l)
-  (equal? (second l) 'illegal-line))
+  (or (totally-illegal-line? l)
+      (equal? (fifth l) 'partly-illegal-line)))
 
 (printf "illegal lines: ~v\n"
         (count illegal-line? parsed-lines))
 
-(take (filter illegal-line? parsed-lines) 30)
-(require sugar)
-(frequency-hash (map third
-                     (take (filter illegal-line? parsed-lines)
-                           2000)))
+
+"a frequency hash of the most common illegal lines:"
+(take
+ (sort
+  (hash->list
+   (frequency-hash
+    (map rest
+         (filter illegal-line? parsed-lines))))
+  >
+  #:key cdr)
+ 15)
+
 
 (define (line-number l) (first l))
 
@@ -354,6 +406,17 @@ d Wright-23327 appear to represent the same person because: same person
 
 ;; represent a gedcom record
 (struct ged-record (line-num opt-ptr tag line-rest subrecords) #:transparent)
+(struct bogus-line (line-num content))
+;; add a bit of type checking
+(define ptr? string?) ;; can we do better here?
+(define opt-ptr? (or/c false? ptr?))
+(define tag? string?)
+(define subrecord? (or/c ged-record? bogus-line?))
+
+
+(define/contract (make-ged-record line-num opt-ptr tag line-rest subrecords)
+  (-> natural? opt-ptr? tag? string? (listof subrecord?) ged-record?)
+  (ged-record line-num opt-ptr tag line-rest subrecords))
 
 ;; given the current level and a list of lines, return
 ;; a list containg a list of parsed lines and a list of unused lines
@@ -362,12 +425,13 @@ d Wright-23327 appear to represent the same person because: same person
   (match lines
     ['() (list '() '())]
     [(cons f r)
-     (cond [(illegal-line? f)
+     (cond [(totally-illegal-line? f)
             ;; for now, treat illegal lines as members of the subs list...
             ;; but they can't have subs themselves, of course.
             (match-define (list rest-these new-lines-2)
               (record-parser expected-level r))
-            (list (cons f rest-these)
+            (list (cons (bogus-line (first f) (second f))
+                        rest-these)
                   new-lines-2)
             ]
            [(< (line-level f) expected-level)
@@ -387,8 +451,16 @@ d Wright-23327 appear to represent the same person because: same person
             ;; parse the rest of the records at this level:
             (match-define (list rest-these new-lines-2)
               (record-parser expected-level new-lines))
-            (list (cons (ged-record (line-number f)
-                                    (third f) (fourth f) (fifth f) subs)
+            ;; at this point we're just going to treat partly-illegal
+            ;; lines as legal lines, sigh.
+            (define line-content
+              (cond [(equal? (fifth f) 'partly-illegal-line)
+                     (sixth f)]
+                    [else
+                     (fifth f)]))
+            (list (cons (make-ged-record (line-number f)
+                                         (third f) (fourth f)
+                                         line-content subs)
                         rest-these)
                   new-lines-2)])]))
 
@@ -402,6 +474,29 @@ d Wright-23327 appear to represent the same person because: same person
             (error 'internal-error
                    "should be unreachable" )]
            [else records])]))
+
+(define legally-empty '("CONT" "TRLR"))
+
+;; validation: no record can have both a pointer and a value.
+;; if a record has no subrecords, then it must have either a pointer or a value.
+(define (check-record ged-rec)
+  (match ged-rec
+    [(bogus-line _ _)
+     '()]
+    [(ged-record _ opt-ptr tag value subrecords)
+     (define this-line-errors
+       (cond [(and (empty? subrecords)
+                   (not opt-ptr)
+                   (equal? value "")
+                   (not (member tag legally-empty)))
+              (list (list 'too-empty ged-rec))]
+             [(and opt-ptr (not (equal? value "")))
+              (list (list 'too-full ged-rec))]
+             [else '()]))
+     (define sub-errors
+       (apply append (map check-record subrecords)))
+     (append this-line-errors sub-errors)]))
+
 
 
 
@@ -458,7 +553,7 @@ d Wright-23327 appear to represent the same person because: same person
   (2 #f "FORM" " Comment")
   (2 #f "DATE" " 9 Dec 2016")
   (2 #f "AUTH" " Jonathan Griffith")
-  (illegal-line
+  (totally-illegal-line
    "<a href=\"/wiki/De_Ceredigion-1\" title=\"De Ceredigion-1\">De Ceredigion-1</a>\
  and Rhydderch-17 appear to represent the same person because: Same first name, married\
  to the same two people, and birth/death dates are close enough to match.")
@@ -466,7 +561,7 @@ d Wright-23327 appear to represent the same person because: same person
   (2 #f "FORM" " Comment")
   (2 #f "DATE" " 30 Oct 2015")
   (2 #f "AUTH" " Julie Ricketts")
-  (illegal-line
+  (totally-illegal-line
    "<a href=\"/wiki/UNKNOWN-227477\" title=\"UNKNOWN-227477\">UNKNOWN-227477</a>\
  and De Ceredigion-1 appear to represent the same person because: Given the dates,\
  these appear to represent the same person.")
@@ -474,7 +569,7 @@ d Wright-23327 appear to represent the same person because: same person
   (2 #f "FORM" " Comment")
   (2 #f "DATE" " 3 Jan 2015")
   (2 #f "AUTH" " Cari Lynn G")
-  (illegal-line
+  (totally-illegal-line
    "<a href=\"/wiki/De_Ceredigion-1\" title=\"De Ceredigion-1\">De Ceredigion-1</a>\
  and Rhydderch-16 appear to represent the same person because: I think that these are\
  the same women."))))
@@ -536,7 +631,18 @@ d Wright-23327 appear to represent the same person because: same person
 (check-not-exn (λ () (record-parser 0 example-data)))
 
 
-(define d (parse-all-lines parsed-lines))
+(define d (time
+           (parse-all-lines parsed-lines)))
+
+(define errors2 (apply append (map check-record d)))
+
+(printf "these are all believed to be wikitree gedcom bugs:\n")
+(printf "frequency of check-record errors:\n")
+(frequency-hash (map first errors2))
+(printf "frequency of too-empty tags:\n")
+(frequency-hash (map ged-record-tag
+                     (map second
+                          (filter (λ (e) (equal? (first e) 'too-empty)) errors2))))
 
 (printf "file contains ~v top-level records\n"
         (length d))
