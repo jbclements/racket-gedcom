@@ -1,6 +1,7 @@
 #lang racket
 
-(require sugar)
+(require sugar
+         rackunit)
 
 ;; this parser is totally incomplete.
 
@@ -623,10 +624,14 @@ d Wright-23327 appear to represent the same person because: same person
 (check-equal? (first (parse-all-lines example-data2))
               (first example-data2-result))
 
+;; next, time to check the records themselves.
+
+;; first record must be a HEAD
 
 
 
-(require rackunit)
+
+
 
 (check-not-exn (λ () (record-parser 0 example-data)))
 
