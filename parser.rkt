@@ -1,7 +1,9 @@
 #lang racket
 
 (require sugar
-         rackunit)
+         rackunit
+         "shared.rkt"
+         "line-parser.rkt")
 
 ;; this parser is totally incomplete.
 
@@ -29,67 +31,86 @@
 ;; level 2 notes, wikitree failures:
 ;; 1) tags like BIRT and DATE often appear 
 
-(define error-bin (box '()))
+
+;; looks like the error-bin mechanism is currently unused....
+#;((define error-bin (box '()))
 (define (parse-error! line message)
   (set-box! error-bin (cons (list line message)
                             (unbox error-bin))))
 (define (reset-parse-errors!)
   (set-box! error-bin '()))
 (define (errors)
-  (sort (unbox error-bin) < #:key first))
+  (sort (unbox error-bin) < #:key first)))
 
+;; given a list '(a b c) return ((0 a) (1 b) (2 c))
 (define (list-with-indices l)
   (for/list ([i (in-naturals)]
              [elt (in-list l)])
     (list i elt)))
 
+;; given a list '(a b c) return ((0 . a) (1 . b) (2 . c)
 (define (pair-with-indices l)
   (for/list ([i (in-naturals)]
              [elt (in-list l)])
     (cons i elt)))
 
-(define lines
-  (time
-   ;; more efficient to deforest? not worrying.
-   (list-with-indices (file->lines "/tmp/foo2.ged"))))
-
-(printf "this file contains ~v lines.\n"
-        (length lines))
-
+;; is does this line consist only of whitespace?
 (define (blank-line? l)
   (regexp-match #px"^[[:space:]]*$" (second l)))
 
-(let ()
-  (define blank-line-count
-    (count blank-line? lines))
-
-  (when (not (equal? 0 blank-line-count))
-    (printf "it contains ~v blank lines, which are apparently illegal.\n"
-            blank-line-count)
-    (printf "Let's just ... ignore them?\n")))
-
-(define non-blank-lines
-  (filter (compose not blank-line?) lines))
-
+;; does this line start with at least one whitespace character?
 (define (starts-with-whitespace? l)
   (regexp-match #px"^[[:space:]]+" (second l)))
 
-(let ()
-  (define bad-lines
-    (filter starts-with-whitespace? non-blank-lines))
-  (define starts-with-whitespace-count
-    (length bad-lines))
+;; STAGE 1: 
+;; given a file name, return a list of the non-blank lines
+;; EFFECT: output about file contents.
+(define (file-non-blank-lines file)
+  (define lines
+    (time
+     ;; more efficient to deforest? not worrying.
+     (list-with-indices (file->lines file))))
+
+  (printf "this file contains ~v lines.\n"
+          (length lines))
+
+  (let ()
+    (define blank-line-count
+      (count blank-line? lines))
+
+    (when (not (equal? 0 blank-line-count))
+      (printf "it contains ~v blank lines, which are apparently illegal.\n"
+              blank-line-count)
+      (printf "Let's just ... ignore them?\n")))
+
+  (define non-blank-lines
+    (filter (compose not blank-line?) lines))
+
+  non-blank-lines)
+
+;; STAGE 2: repair broken comment lines
+
+;; given a list of non-blank lines, repair comments and return a list of the lines
+;; EFFECT: verbose reporting
+(define (repair non-blank-lines)
+  (let ()
+    (define bad-lines
+      (filter starts-with-whitespace? non-blank-lines))
+    (define starts-with-whitespace-count
+      (length bad-lines))
   
-  (when (not (equal? 0 starts-with-whitespace-count))
-    (printf "It contains ~v lines that start with whitespace, also illegal.\n"
-            starts-with-whitespace-count)
+    (when (not (equal? 0 starts-with-whitespace-count))
+      (printf "It contains ~v lines that start with whitespace, also illegal.\n"
+              starts-with-whitespace-count)
 
-    (printf "here are the first few (up to 10):\n")
-    (pretty-print (take bad-lines (min 10 (length bad-lines))))
-    (printf "\nsigh.\n\n")))
+      (printf "here are the first few (up to 10):\n")
+      (pretty-print (take bad-lines (min 10 (length bad-lines))))
+      (printf "\nsigh.\n\n")))
 
-(printf "long lines: ~v\n"
-        (count (λ (l) (< 255 (string-length (second l)))) non-blank-lines))
+  (printf "long lines: ~v\n"
+          (count (λ (l) (< 255 (string-length (second l)))) non-blank-lines))
+
+  (repair-comments non-blank-lines))
 
 ;; there's some serious breakage in and around these "Comment" objects.
 ;; Specifically, the exported gedcom files aren't quoting these lines the
@@ -162,243 +183,6 @@ d Wright-23327 appear to represent the same person because: same person
    (6 "0 @I58@ INDI")
    (7 "1 NAME Joseph  /Wright/")))
 
-(define repaired-lines
-  (time (repair-comments non-blank-lines)))
-
-;; okay, we're going to be gluing together strings to make regular expressions.
-;; this is a bad idea, and I'd rather use something like Olin Shivers' SREs, but
-;; I can't currently find a working implementation.
-
-;; also, the number of parens that are required for grouping of "or" blocks means
-;; that the resulting regexp has a freakish number of submatches. Most of them
-;; must be ignored. Ugh.
-
-;; a nonzero digit:
-(define nzdigit "[1-9]")
-
-; delim:= (0x20)
-;; a space
-(define delim " ")
-
-; digit:= [(0x30)-(0x39) ]
-;; a standard digit
-
-;level:=
-;[ digit | digit + digit ]
-;; one or two digits, with 2 digits only second can be zero (side condition stated in text)
-(define level "([0-9]|[1-9][0-9])")
-
-
-; non_at:=
-; [ alpha | digit | otherchar | (0x23) | (0x20 ) ]
-
-;; okay, this is a bit silly; the otherchar definition is contentious,
-;; and it looks non_at reduces to "all printing characters other than @, #, and _
-;; also, this "print" should almost certainly be extended to cover all
-;; unicode printing chars.
-(define non-at "[^@#_[:space:]]")
-
-
-; pointer_char:= [ non_at ]
-(define pointer-char non-at)
-
-; pointer_string:=
-; [ null | pointer_char | pointer_string + pointer_char ]
-
-;; this seems like a long-winded way to write it... the second one is unnecessary?
-
-(define pointer-string
-  (~a pointer-char "*"))
-
-; pointer:=
-; (0x40) + alphanum + pointer_string + (0x40)
-;; at-sign-wrapped string, must be a first char
-;; submatched
-
-(define pointer
-  (~a "@([[:alnum:]]"pointer-string")@"))
-
-
-; xref_ID:= pointer
-
-(define xref-id pointer)
-
-; optional_xref_ID:= xref_ID + delim
-(define opt-xref-id (~a xref-id delim))
-
-
-
-;tag:=
-; [ [(0x5F)] + alphanum | tag + alphanum ]
-
-(define tag
-  "(_?[[:alnum:]]+)")
-
-
-; any_char:=
-; [ alpha | digit | otherchar | (0x23) | (0x20) | (0x40)+(0x40) ]
-
-;; it really looks like this should have included underscore. Hmm..
-;; okay, putting it in there for now. File  a bug report against the spec?
-(define any-char
-  (~a "([^@]|@@)"))
-
-;escape_text:=
-; [ any_char | escape_text + any_char ]
-
-(define escape-text
-  (~a "("any-char")+"))
-
-; escape:=
-; (0x40) + (0x23) + escape_text + (0x40)
-(define escape
-  (~a "@#("escape-text")@"))
-
-;; line_text:= [ any_char | line_text + any_char ]
-(define line-text
-  escape-text)
-
-; line_item:=
-; [ escape | line_text | escape + delim + line_text ]
-
-(define line-item
-  ;; will this be matched efficiently?
-  (~a "("escape delim line-text"|"escape"|"line-text")"))
-
-;; this is important, to allow replacement of #f with "" later
-;; in line parsing.
-(check-false (regexp-match? line-item ""))
-
-
-;line_value:=
-;[ pointer | line_item ]
-
-(define line-value
-  (~a "("pointer"|"line-item")"))
-
-(define optional-line-value
-  (~a " " line-value))
-
-;gedcom_line:=
-;level + delim + [optional_xref_ID] + tag + [optional_line_value] + terminator
-(define gedcom-line
-  (pregexp (~a "^" level delim "("opt-xref-id")?" tag "("optional-line-value")?" "$")))
-
-;; A line that doesn't match the previous pattern
-;; useful to prevent parsing breakage.
-(define exceptional-gedcom-line
-  (pregexp (~a "^" level delim tag delim "(.*)$")))
-
-
-
-
-;; should not fail to match....
-(check-equal? (regexp-match gedcom-line "0 HEAD")
-              '("0 HEAD"
-                "0" ;; level
-                #f ;; bogus
-                #f ;; xref name
-                "HEAD" ;; tag
-                 #f ;; delim+line-value
-                 #f ;; line-value
-                 #f #f #f #f #f #f #f #f #f #f #f #f ;; oh dear heaven
-                 ))
-(check-equal? (take (regexp-match gedcom-line "1 SOUR WikiTree.com") 7)
-             '("1 SOUR WikiTree.com"
-               "1" #f #f
-                   "SOUR"
-                   " WikiTree.com"
-                   "WikiTree.com"))
-
-(check-equal? (take (regexp-match gedcom-line "2 TYPE wikitree.page_id") 7)
-              '("2 TYPE wikitree.page_id"
-                "2" #f #f
-                "TYPE"
-                " wikitree.page_id"
-                "wikitree.page_id"))
-
-(check-equal? (take (regexp-match gedcom-line "1 FAMS @F9@") 7)
-              '("1 FAMS @F9@"
-                "1" #f #f
-                "FAMS"
-                " @F9@"
-                "@F9@"))
-(regexp-match gedcom-line "1 FAMS @F9@")
-
-
-
-;; the structure of the given grammar makes it hard to separate parsing
-;; into a traditional tokenizer/parser format, so this is going to be
-;; ad-hoc, like every other parser in the world, sigh.
-;; gedcom_line ::= level + delim +  [optional_xref_ID] + tag + [optional_line_value] + terminator
-;; returns
-;; (U (List Natural 'totally-illegal-line String)
-;;   (List Natural Natural (U String False) String String)
-;;   (List Natural Natural (U String False) String 'partly-illegal-line String))
-(define (parse-gedcom-line l)
-  (define line-num (first l))
-  (define line-content (second l))
-  (match line-content
-    [(regexp gedcom-line
-             ;; the "list-rest" is necessary because the regexp
-             ;; requires many extra pairs of parens for grouping,
-             ;; are treated as extra match locations.
-             (list-rest _ levelstr _ maybe-xref-id
-                        tag _ line-text _))
-     (list line-num ;; useful for error messages...
-           (string->number levelstr)
-           maybe-xref-id
-           tag
-           ;; this is not collapsing cases because line-text
-           ;; doesn't match the empty string
-           (or line-text ""))]
-    ;; we get improved parsing and error reporting when we partially parse
-    ;; these illegal lines.
-    [(regexp exceptional-gedcom-line (list _ levelstr tag rest-of-line))
-     (list line-num
-                  (string->number levelstr)
-                  #f
-                  tag
-                  'partly-illegal-line
-                  rest-of-line)]
-    [other (list (first l) 'totally-illegal-line (second l))]))
-
-;; this one is totally legal:
-(check-equal? (parse-gedcom-line (list 1234 "74 CONT"))
-              '(1234 74 #f "CONT" ""))
-;; this one is technically not:
-(check-equal? (parse-gedcom-line (list 1234 "74 CONT "))
-              '(1234 74 #f "CONT" partly-illegal-line ""))
-
-(define parsed-lines
-  (time
-   (map parse-gedcom-line repaired-lines)))
-
-
-(define (totally-illegal-line? l)
-  (equal? (second l) 'totally-illegal-line))
-
-(printf "totally illegal lines: ~v\n"
-        (count totally-illegal-line? parsed-lines))
-
-(define (illegal-line? l)
-  (or (totally-illegal-line? l)
-      (equal? (fifth l) 'partly-illegal-line)))
-
-(printf "illegal lines: ~v\n"
-        (count illegal-line? parsed-lines))
-
-
-"a frequency hash of the most common illegal lines:"
-(take
- (sort
-  (hash->list
-   (frequency-hash
-    (map rest
-         (filter illegal-line? parsed-lines))))
-  >
-  #:key cdr)
- 15)
 
 
 (define (line-number l) (first l))
@@ -406,7 +190,7 @@ d Wright-23327 appear to represent the same person because: same person
 (define (line-level l) (second l))
 
 ;; represent a gedcom record
-(struct ged-record (line-num opt-ptr tag line-rest subrecords) #:transparent)
+(struct ged-record (line-num opt-xref-id tag line-rest subrecords) #:transparent)
 (struct bogus-line (line-num content))
 ;; add a bit of type checking
 (define ptr? string?) ;; can we do better here?
@@ -416,7 +200,8 @@ d Wright-23327 appear to represent the same person because: same person
 
 
 (define/contract (make-ged-record line-num opt-ptr tag line-rest subrecords)
-  (-> natural? opt-ptr? tag? string? (listof subrecord?) ged-record?)
+  (-> natural? opt-ptr? tag? (or/c string? (list/c 'pointer string?))
+      (listof subrecord?) ged-record?)
   (ged-record line-num opt-ptr tag line-rest subrecords))
 
 ;; given the current level and a list of lines, return
@@ -624,7 +409,111 @@ d Wright-23327 appear to represent the same person because: same person
 (check-equal? (first (parse-all-lines example-data2))
               (first example-data2-result))
 
+(define (record->pointer-targets record)
+  (define top-level-targets
+    (cond [(ged-record-opt-xref-id record)
+           =>
+           (λ (x) (list x))]
+          [else
+           '()]))
+  (apply append
+         (cons top-level-targets
+               (map record->pointer-targets (ged-record-subrecords record)))))
+
+(check-equal? (record->pointer-targets
+               (ged-record 7
+                            "I3299" "INDI" ""
+                            (list
+                             (ged-record 8
+                                         #f "NAME" " Jane  /UnknoXwn/"
+                                         (list (ged-record 9 #f #"_AKA" " RhyddeXrch" '())))
+                             (ged-record 10
+                                         "ZZBAGGER" "BIRT" ""
+                                         (list (ged-record 11 #f "DATE" " ABT 1651" '())
+                                               (ged-record
+                                                12 #f "PLAC"
+                                                " Alltgoch, Llanwenog, Cardiganshire, Wales"
+                                                '())))
+                             (ged-record 13 #f "DEAT" "" '()))))
+              '("I3299" "ZZBAGGER"))
+
+(define (pointer-integrity-check records)
+  (define all-pointer-targets
+    (apply append (map record->pointer-targets records)))
+  (let search ([records records])
+    (for-each
+     (λ (record)
+       (match (ged-record-line-rest record)
+         [(list 'pointer str)
+          (when (not (member str all-pointer-targets))
+            (error 'pointer-integrity-search
+                   "pointer ~a has no matching target in these records"
+                   str))]
+         [other 'okay])
+       (search (ged-record-subrecords record)))
+     records)))
+
+(check-not-exn
+ (λ ()
+   (pointer-integrity-check
+    (list
+     (ged-record 7
+                 "I32199" "INDI" ""
+                 (list
+                  (ged-record 8
+                              #f "NAME" " Jane  /UnknoXwn/"
+                              (list (ged-record 9 #f #"_AKA" " RhyddeXrch" '())))
+                  (ged-record 10
+                              "ZZBAGGER" "BIRT" ""
+                              (list (ged-record 11 #f "DATE" '(pointer "I32990") '())
+                                    (ged-record 12 #f "PLAC"
+                                                " Alltgoch, Llanwenog, Cardiganshire, Wales" '())))
+                  (ged-record 13 #f "DEAT" "" '())))
+     (ged-record 7
+                 "I32990" "INDI" ""
+                 (list
+                  (ged-record 8
+                              #f "NAME" " Jane  /UnknoXwn/"
+                              (list (ged-record 9 #f '(pointer "I32199") " RhyddeXrch" '())))
+                  (ged-record 10
+                              "ZZBAGGER" "BIRT" ""
+                              (list (ged-record 11 #f "DATE" " ABT 1651" '())
+                                    (ged-record 12 #f "PLAC"
+                                                " Alltgoch, Llanwenog, Cardiganshire, Wales" '())))
+                  (ged-record 13 #f "DEAT" "" '())))))))
+
+(check-exn
+ #px"has no matching target"
+ (λ ()
+   (pointer-integrity-check
+    (list
+     (ged-record 7
+                 "I32199" "INDI" ""
+                 (list
+                  (ged-record 8
+                              #f "NAME" " Jane  /UnknoXwn/"
+                              (list (ged-record 9 #f #"_AKA" " RhyddeXrch" '())))
+                  (ged-record 10
+                              "ZZBAGGER" "BIRT" ""
+                              (list (ged-record 11 #f "DATE" '(pointer "I32990X") '())
+                                    (ged-record 12 #f "PLAC"
+                                                " Alltgoch, Llanwenog, Cardiganshire, Wales" '())))
+                  (ged-record 13 #f "DEAT" "" '())))
+     (ged-record 7
+                 "I32990" "INDI" ""
+                 (list
+                  (ged-record 8
+                              #f "NAME" " Jane  /UnknoXwn/"
+                              (list (ged-record 9 #f '(pointer "I32199") " RhyddeXrch" '())))
+                  (ged-record 10
+                              "ZZBAGGER" "BIRT" ""
+                              (list (ged-record 11 #f "DATE" " ABT 1651" '())
+                                    (ged-record 12 #f "PLAC"
+                                                " Alltgoch, Llanwenog, Cardiganshire, Wales" '())))
+                  (ged-record 13 #f "DEAT" "" '())))))))
+
 ;; next, time to check the records themselves.
+
 
 ;; first record must be a HEAD
 
@@ -632,12 +521,245 @@ d Wright-23327 appear to represent the same person because: same person
 
 
 
+;; given a list of records, return a ged-hash
+(define (records->hash records)
+  ;; after thinking about this harder, it appears that there are a bunch
+  ;; of "this before that" distinctions that just aren't important for this
+  ;; data. It would appear to me that it preserves correctness to simply group
+  ;; the user records by tag (preserving order, of course), and then pull the
+  ;; tags out one at a time. It will of course be important to check that none
+  ;; get left behind.
+  ;; a map from tag to the records with that tag
+  (define records-by-tag (group-by ged-record-tag records))
+  (define prs (map tag-group-parse records-by-tag))
+  (make-immutable-hash prs))
+
+;; take the records with the same tag as the spec, parse them all, return
+;; (cons tag treenodes) and list of errors
+(define (tag-group-parse tag-group)
+  (define records-and-errs
+    (map record-parse tag-group))
+  (cons (ged-record-tag (first tag-group)) records-and-errs))
+
+(define (record-parse record)
+  (treenode (ged-record-opt-xref-id record)
+            (ged-record-line-rest record)
+            (records->hash (ged-record-subrecords record))
+            (ged-record-line-num record)))
+
+;; Validation
+
+;; a structure-pat contains a tag, a count specifier, an item spec and a list of structure-pats
+;; OR just 'ANY
+
+(define address-subpats 'ANY)
+
+(define head-spec
+  `(HEAD one empty
+         ((SOUR one str
+                ((VERS opt1 str ())
+                 (NAME opt1 str ())
+                 (CORP opt1 str
+                       ,address-subpats)
+                 (DATA opt1 str
+                       ((DATE opt1 str ())
+                        ;; CONT/CONC gone already?
+                        (COPR opt1 str ())))))
+          (DEST opt1 str ())
+          (DATE opt1 str
+                ((TIME opt1 str ())))
+          (SUBM one ptr ())
+          (FILE opt1 str ())
+          (COPR opt1 str ())
+          (GEDC one empty
+                ((VERS one str ())
+                 (FORM one str ())))
+          (CHAR one str
+                ((VERS opt1 str ())))
+          (LANG opt1 str ())
+          (PLAC opt1 empty
+                ((FORM one str ())))
+          (NOTE opt1 str ()))))
+
+;; given a list of specs and a ged-hash, return a list of errors
+(define (records-validate specs the-hash parent-line-num)
+  (define spec-tags (map symbol->string (map first specs)))
+  ;; since each tag corresponds to a hash key and/or a "field"
+  ;; in a conceptual "structure",
+  ;; it would be bad if a tag occurred more than once in a list of specs...
+  (when (check-duplicates spec-tags)
+    (error 'record-parse
+           "duplicated tag name in list of specs: ~e"))
+  (define record-tags (hash-keys the-hash))
+  (define extra-tag-errs
+    (let ()
+      (define leftover-tags (set-subtract record-tags spec-tags))
+      (cond [(not (empty? leftover-tags))
+             ;; the line number of the first record with a tag that doesn't appear in the spec:
+             (define first-line-num
+               (first
+                (sort
+                 (map treenode-line-num
+                      (apply append
+                             (map (λ (tag) (hash-ref the-hash tag)) leftover-tags)))
+                 <)))
+             (list (list first-line-num
+                         (format "tags not mentioned in the spec: ~e"
+                                 leftover-tags)))]
+            [else '()])))
+  (define sub-errs (map (1spec-validate the-hash parent-line-num) specs))
+  (apply append (cons extra-tag-errs sub-errs)))
+
+
+;; take the records with the same tag as the spec, parse them all, return
+;; list of errors
+(define ((1spec-validate the-hash parent-line-num) spec)
+  #;(printf "debug: spec: ~a\n" spec)
+  (match-define (list tag requirement line-spec sub-specs) spec)
+  (define matching-records (hash-ref the-hash (symbol->string tag) '()))
+  #;(printf "debug: records\n~a\n"
+          matching-records)
+  (define count-errs
+    (match (list requirement (length matching-records))
+      [(list 'one 0) (list (list parent-line-num (format "missing required record ~e" tag)))]
+      [(list 'one 1) '()]
+      [(list 'one n) (list (list (treenode-line-num (first matching-records))
+                                (format "more than one record with tag ~e" tag)))]
+      [(list 'opt1 0) '()]
+      [(list 'opt1 1) '()]
+      [(list 'opt1 n) (list (list (treenode-line-num (first matching-records))
+                                 (format "more than one record with tag ~e" tag)))]
+      ;; there will be others here...
+      ))
+  (define sub-errs
+    (match sub-specs
+      ['ANY '()]
+      [(list spec ...)
+       (map (record-validate line-spec sub-specs)
+         matching-records)]))
+  (apply append (cons count-errs sub-errs)))
+
+
+(define (non-empty-string? str)
+  (not (equal? str "")))
+
+(define (empty-string? str)
+  (equal? str ""))
+
+(define (pointer? l)
+  (and (list? l)
+       (not (empty? l))
+       (equal? (first l) 'pointer)))
+
+;; given a line-spec, a list of sub-specs, and a record,
+;; return a list of errors
+(define ((record-validate line-spec sub-specs) the-treenode)
+  (match-define (treenode opt-xref-id line-content elements line-num)
+    the-treenode)
+  ;; we know it has the right tag.
+  (define line-content-pred
+    (match line-spec
+      ['str non-empty-string?]
+      ['empty empty-string?]
+      ['ptr pointer?]))
+  (define errs
+    (cond [(line-content-pred line-content)
+           '()]
+          [else
+           (list (list line-num
+                       "expected string matching spec ~a, got: ~e"
+                       line-spec
+                       line-content))])
+    )
+  (match-define sub-errs
+    (records-validate sub-specs elements line-num)) 
+  (append errs sub-errs))
+
+
+
+               
+
+;; just to simplify my test cases...
+(define (tnstr str)
+  (tn str hash))
+(define (tn str hash)
+  (treenode #f str hash))
+(define (tnhash hash)
+  (treenode #f "" hash))
+
+(define my-head
+  (ged-record
+ 0
+ #f
+ "HEAD"
+ ""
+ (list
+  (ged-record
+   1
+   #f
+   "SOUR"
+   "WikiTree.com"
+   (list
+    (ged-record 2 #f "NAME" "WikiTree: The Free Family Tree" '())
+    (ged-record 3 #f "CORP" "Interesting.com, Inc." '())))
+  (ged-record
+   4
+   #f
+   "DATE"
+   "31 May 2021"
+   (list (ged-record 5 #f "TIME" "05:40:34 UTC" '())))
+  (ged-record 6 #f "CHAR" "UTF-8" '())
+  (ged-record 7 #f "FILE" "26051277-c85e6d.ged" '())
+  (ged-record
+   8
+   #f
+   "COPR"
+   "Interesting.com, Inc. and John Clements"
+   '())
+  (ged-record 9 #f "SUBM" '(pointer "SUBM") '())
+  (ged-record
+   10
+   #f
+   "GEDC"
+   ""
+   (list
+    (ged-record 11 #f "VERS" "5.5.1" '())
+    (ged-record 12 #f "FORM" "LINEAGE-LINKED" '())))
+  (ged-record
+   13
+   #f
+   "NOTE"
+   "This file contains private information and\
+ may not be redistributed, published, or made public."
+   '()))))
+
+
+
+
+
+(check-equal?
+ ((record-validate (third head-spec)
+                   (fourth head-spec))
+  (first (hash-ref (records->hash (list my-head)) "HEAD")))
+ '())
+
+
+
 
 (check-not-exn (λ () (record-parser 0 example-data)))
 
+;; should get rid of CONC and CONT here?
 
-(define d (time
-           (parse-all-lines parsed-lines)))
+;; LIVE:
+
+(define non-blank-lines (file-non-blank-lines "/Users/Clements/genealogy/xc-no-text.ged"))
+
+(define repaired-lines (time (repair non-blank-lines)))
+
+(define parsed-lines (parse-lines repaired-lines))
+
+(printf "RECORD PARSING...\n")
+(define d (time (parse-all-lines parsed-lines)))
 
 (define errors2 (apply append (map check-record d)))
 
@@ -652,4 +774,13 @@ d Wright-23327 appear to represent the same person because: same person
 (printf "file contains ~v top-level records\n"
         (length d))
 
+  (pointer-integrity-check d)
 
+(define top-hash (records->hash d))
+
+
+
+(require racket/fasl)
+(call-with-output-file "/tmp/xc-tree.fasl"
+  (λ (port)
+    (s-exp->fasl top-hash port)))
