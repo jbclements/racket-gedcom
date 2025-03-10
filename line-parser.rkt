@@ -171,7 +171,7 @@
 
 ; delim:= (0x20)
 ;; a space
-(define-RE delim-x " ")
+(define-RE delim " ")
 
 ; digit:= [(0x30)-(0x39) ]
 ;; a standard digit
@@ -179,7 +179,7 @@
 ;level:=
 ;[ digit | digit + digit ]
 ;; one or two digits, with 2 digits only second can be zero (side condition stated in text)
-(define-RE level-x (or (chars digit) (cat nzdigit (chars digit))))
+(define-RE level (or (chars digit) (cat nzdigit (chars digit))))
 
 
 ; non_at:=
@@ -189,109 +189,99 @@
 ;; and it looks non_at reduces to "all printing characters other than @, #, and _
 ;; also, this "print" should almost certainly be extended to cover all
 ;; unicode printing chars.
-(define-RE non-at-x (chars (complement "@#_" space)))
-
+(define-RE non-at (chars (complement "@#_" space)))
 
 ; pointer_char:= [ non_at ]
-(define-RE pointer-char-x non-at-x)
+(define-RE pointer-char non-at)
 
 ; pointer_string:=
 ; [ null | pointer_char | pointer_string + pointer_char ]
 
 ;; this seems like a long-winded way to write it... the second one is unnecessary?
-(define-RE pointer-string-x
-  (repeat pointer-char-x))
+(define-RE pointer-string (repeat pointer-char))
 
 ; pointer:=
 ; (0x40) + alphanum + pointer_string + (0x40)
 ;; at-sign-wrapped string, must be a first char
 ;; submatched
-(define-RE pointer-x
-  (cat "@" (report (cat (chars alnum) pointer-string-x)) "@"))
+(define-RE pointer
+  (cat "@" (report (cat (chars alnum) pointer-string)) "@"))
 
 
 ; xref_ID:= pointer
-(define-RE xref-id-x pointer-x)
+(define-RE xref-id pointer)
 
 ; optional_xref_ID:= xref_ID + delim
-(define-RE opt-xref-id-x (cat xref-id-x delim-x))
-
-
+(define-RE opt-xref-id (cat xref-id delim))
 
 ;tag:=
 ; [ [(0x5F)] + alphanum | tag + alphanum ]
-
-(define tag
-  "(_?[[:alnum:]]+)")
-(define-RE tag-x (cat (? "_") (+ (chars alnum))))
-
+(define-RE tag (cat (? "_") (+ (chars alnum))))
 
 ; any_char:=
 ; [ alpha | digit | otherchar | (0x23) | (0x20) | (0x40)+(0x40) ]
 
 ;; it really looks like this should have included underscore. Hmm..
 ;; okay, putting it in there for now. File  a bug report against the spec?
-(define-RE any-char-x
+(define-RE any-char
   (or (chars (complement "@"))
       "@@"))
 
 ;escape_text:=
 ; [ any_char | escape_text + any_char ]
 ;; FIXME eliminate this report
-(define-RE escape-text-x (report (+ any-char-x)))
+(define-RE escape-text (report (+ any-char)))
 
 ;; NB: the term "escape" here is used in a very different sense that I would expect.
 ;; specifically, it specifically allows an "extra tag" to be used to specify a
 ;; calendar, with an optional line_item string following it. Weird.
 ; escape:=
 ; (0x40) + (0x23) + escape_text + (0x40)
-(define-RE escape-x
+(define-RE escape
   ;; FIXME elim report
-  (cat "@#" (report escape-text-x) "@"))
+  (cat "@#" (report escape-text) "@"))
 
 ;; line_text:= [ any_char | line_text + any_char ]
-(define-RE line-text-x escape-text-x)
+(define-RE line-text escape-text)
 
 ; line_item:=
 ; [ escape | line_text | escape + delim + line_text ]
 
-(define-RE line-item-x
+(define-RE line-item
   ;; FIXME eliminate this report and the other one
-  (report (or (cat escape-x delim-x (report line-text-x))
-              escape-x
-              line-text-x)))
+  (report (or (cat escape delim (report line-text))
+              escape
+              line-text)))
 
 ;; this is important, to allow replacement of #f with "" later
 ;; in line parsing.
-(check-false (regexp-match? (px line-item-x) ""))
-
+(check-false (regexp-match? (px line-item) ""))
 
 ;line_value:=
 ;[ pointer | line_item ]
-(define-RE line-value-x (or pointer-x line-item-x))
-
+(define-RE line-value (or pointer line-item))
 
 ;; regexp wrappers
 
-(define line-item-rx (px ^ line-item-x))
-(define pointer-rx (px ^ pointer-x))
-(define escape-rx (px ^ escape-x))
+(define line-item-rx (px ^ line-item))
+(define pointer-rx (px ^ pointer))
+(define escape-rx (px ^ escape))
 
 
 ;gedcom_line:=
 ;level + delim + [optional_xref_ID] + tag + [optional_line_value] + terminator
 (define gedcom-line
-  (px ^ (report level-x)
-      delim-x
-      (? opt-xref-id-x)
-      (report tag-x)
-      (? (cat delim-x (report line-value-x)))
+  (px ^ (report level)
+      delim
+      (? opt-xref-id)
+      (report tag)
+      (? (cat delim (report line-value)))
       $))
 
 ;; A catch-all line that doesn't match the previous pattern
 ;; useful to prevent parsing breakage.
 (define exceptional-gedcom-line
-  (px ^ (report level-x) delim-x (report tag-x) delim-x (report (* (inject "."))) $))
+  (px ^ (report level) delim (report tag) delim (report (* (inject "."))) $))
 
 
 
