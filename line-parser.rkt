@@ -102,7 +102,7 @@
              ;; requires many extra pairs of parens for grouping,
              ;; are treated as extra match locations.
              (list-rest _ levelstr maybe-xref-id
-                        tag _ line-text _))
+                        tag line-text _))
      ;; this is not collapsing cases because line-text
      ;; doesn't match the empty string
      (define line-value
@@ -117,11 +117,11 @@
                             ;;; sigh....
                             (match line-text
                               [(regexp line-item-rx
-                                       ;; unbelievably sensitive...
-                                       (list _ _ #f #f #f #f #f #f str _ _ #f #f))
+                                       ;; unbelievably sensitive... (getting better)
+                                       (list _ _ #f #f #f #f str _ #f))
                                (list 'escape str)]
                               [(regexp line-item-rx
-                                       (list _ _ str _ _ rest _ _ #f #f #f #f #f))
+                                       (list _ _ str _ rest _ #f #f #f))
                                (list 'escape-and-str str rest)])]
                            [else
                             (error 'parse-gedcom-line
@@ -171,7 +171,6 @@
 
 ; delim:= (0x20)
 ;; a space
-(define delim " ")
 (define-RE delim-x " ")
 
 ; digit:= [(0x30)-(0x39) ]
@@ -180,7 +179,6 @@
 ;level:=
 ;[ digit | digit + digit ]
 ;; one or two digits, with 2 digits only second can be zero (side condition stated in text)
-(define level "([0-9]|[1-9][0-9])")
 (define-RE level-x (or (chars digit) (cat nzdigit (chars digit))))
 
 
@@ -191,21 +189,16 @@
 ;; and it looks non_at reduces to "all printing characters other than @, #, and _
 ;; also, this "print" should almost certainly be extended to cover all
 ;; unicode printing chars.
-(define non-at "[^@#_[:space:]]")
 (define-RE non-at-x (chars (complement "@#_" space)))
 
 
 ; pointer_char:= [ non_at ]
-(define pointer-char non-at)
 (define-RE pointer-char-x non-at-x)
 
 ; pointer_string:=
 ; [ null | pointer_char | pointer_string + pointer_char ]
 
 ;; this seems like a long-winded way to write it... the second one is unnecessary?
-
-(define pointer-string
-  (~a pointer-char "*"))
 (define-RE pointer-string-x
   (repeat pointer-char-x))
 
@@ -213,20 +206,14 @@
 ; (0x40) + alphanum + pointer_string + (0x40)
 ;; at-sign-wrapped string, must be a first char
 ;; submatched
-
-(define pointer
-  (~a "@([[:alnum:]]"pointer-string")@"))
 (define-RE pointer-x
   (cat "@" (report (cat (chars alnum) pointer-string-x)) "@"))
 
 
 ; xref_ID:= pointer
-
-(define xref-id pointer)
 (define-RE xref-id-x pointer-x)
 
 ; optional_xref_ID:= xref_ID + delim
-(define opt-xref-id (~a xref-id delim))
 (define-RE opt-xref-id-x (cat xref-id-x delim-x))
 
 
@@ -244,53 +231,51 @@
 
 ;; it really looks like this should have included underscore. Hmm..
 ;; okay, putting it in there for now. File  a bug report against the spec?
-(define any-char
-  (~a "([^@]|@@)"))
+(define-RE any-char-x
+  (or (chars (complement "@"))
+      "@@"))
 
 ;escape_text:=
 ; [ any_char | escape_text + any_char ]
-
-(define escape-text
-  (~a "("any-char")+"))
+;; FIXME eliminate this report
+(define-RE escape-text-x (report (+ any-char-x)))
 
 ;; NB: the term "escape" here is used in a very different sense that I would expect.
 ;; specifically, it specifically allows an "extra tag" to be used to specify a
 ;; calendar, with an optional line_item string following it. Weird.
 ; escape:=
 ; (0x40) + (0x23) + escape_text + (0x40)
-(define escape
-  (~a "@#("escape-text")@"))
+(define-RE escape-x
+  ;; FIXME elim report
+  (cat "@#" (report escape-text-x) "@"))
 
 ;; line_text:= [ any_char | line_text + any_char ]
-(define line-text
-  escape-text)
+(define-RE line-text-x escape-text-x)
 
 ; line_item:=
 ; [ escape | line_text | escape + delim + line_text ]
 
-(define line-item
-  ;; will this be matched efficiently?
-  (~a "("escape delim "("line-text")|"escape"|"line-text")"))
+(define-RE line-item-x
+  ;; FIXME eliminate this report and the other one
+  (report (or (cat escape-x delim-x (report line-text-x))
+              escape-x
+              line-text-x)))
 
 ;; this is important, to allow replacement of #f with "" later
 ;; in line parsing.
-(check-false (regexp-match? line-item ""))
+(check-false (regexp-match? (px line-item-x) ""))
 
 
 ;line_value:=
 ;[ pointer | line_item ]
+(define-RE line-value-x (or pointer-x line-item-x))
 
-(define line-value
-  (~a "("pointer"|"line-item")"))
-
-(define optional-line-value
-  (~a " " line-value))
 
 ;; regexp wrappers
 
-(define line-item-rx (pregexp (string-append "^" line-item)))
-(define pointer-rx (pregexp (string-append "^" pointer)))
-(define escape-rx (pregexp (string-append "^" escape)))
+(define line-item-rx (px ^ line-item-x))
+(define pointer-rx (px ^ pointer-x))
+(define escape-rx (px ^ escape-x))
 
 
 ;gedcom_line:=
@@ -298,19 +283,15 @@
 (define gedcom-line
   (px ^ (report level-x)
       delim-x
-      ;; remove this use of report after refactoring?
       (? opt-xref-id-x)
       (report tag-x)
-      ;; outer report can probably go away
-      (? (report (inject " (@([[:alnum:]][^@#_[:space:]]*)@|(@#((([^@]|@@))+)@ ((([^@]|@@))+)|@#((([^@]|@@))+)@|(([^@]|@@))+))")))
-      $)
-  #;(px ^ level-x delim-x (? opt-xref-id-x ) tag (? optional-line-value ) $)
-  #;(pregexp (~a "^" level delim "("opt-xref-id")?" tag "("optional-line-value")?" "$")))
+      (? (cat delim-x (report line-value-x)))
+      $))
 
-;; A line that doesn't match the previous pattern
+;; A catch-all line that doesn't match the previous pattern
 ;; useful to prevent parsing breakage.
 (define exceptional-gedcom-line
-  (pregexp (~a "^" level delim tag delim "(.*)$")))
+  (px ^ (report level-x) delim-x (report tag-x) delim-x (report (* (inject "."))) $))
 
 
 
@@ -321,29 +302,25 @@
                 "0" ;; level
                 #f ;; xref name
                 "HEAD" ;; tag
-                 #f ;; delim+line-value
                  #f ;; line-value
-                 #f #f #f #f #f #f #f #f #f #f #f #f #f ;; oh dear heaven
+                 #f #f #f #f #f #f #f #f #f ;; just for grouping...
                  ))
-(check-equal? (take (regexp-match gedcom-line "1 SOUR WikiTree.com") 6)
+(check-equal? (take (regexp-match gedcom-line "1 SOUR WikiTree.com") 5)
              '("1 SOUR WikiTree.com"
                "1" #f
                    "SOUR"
-                   " WikiTree.com"
                    "WikiTree.com"))
 
-(check-equal? (take (regexp-match gedcom-line "2 TYPE wikitree.page_id") 6)
+(check-equal? (take (regexp-match gedcom-line "2 TYPE wikitree.page_id") 5)
               '("2 TYPE wikitree.page_id"
                 "2" #f
                 "TYPE"
-                " wikitree.page_id"
                 "wikitree.page_id"))
 
-(check-equal? (take (regexp-match gedcom-line "1 FAMS @F9@") 6)
+(check-equal? (take (regexp-match gedcom-line "1 FAMS @F9@") 5)
               '("1 FAMS @F9@"
                 "1" #f
                 "FAMS"
-                " @F9@"
                 "@F9@"))
 
 
