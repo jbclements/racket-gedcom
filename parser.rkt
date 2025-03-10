@@ -752,7 +752,7 @@ d Wright-23327 appear to represent the same person because: same person
 
 ;; LIVE:
 
-(define non-blank-lines (file-non-blank-lines "/Users/Clements/genealogy/xc-no-text.ged"))
+(define non-blank-lines (file-non-blank-lines "/Users/Clements/cfs/scanned-documents/genealogy/xc-no-text.ged"))
 
 (define repaired-lines (time (repair non-blank-lines)))
 

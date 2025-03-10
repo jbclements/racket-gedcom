@@ -1,7 +1,8 @@
 #lang racket
 
 (require rackunit
-         sugar)
+         sugar
+         scramble/regexp)
 
 ;; this file parses the lines into parsed-lines. Makes sure the lines
 ;; are legal, produce a structured output. This is the stage that cares
@@ -100,7 +101,7 @@
              ;; the "list-rest" is necessary because the regexp
              ;; requires many extra pairs of parens for grouping,
              ;; are treated as extra match locations.
-             (list-rest _ levelstr _ maybe-xref-id
+             (list-rest _ levelstr maybe-xref-id
                         tag _ line-text _))
      ;; this is not collapsing cases because line-text
      ;; doesn't match the empty string
@@ -163,12 +164,15 @@
 ;; that the resulting regexp has a freakish number of submatches. Most of them
 ;; must be ignored. Ugh.
 
+;; 2025-03-09 This is all getting way way better with Ryan Culpepper's scramble:
+
 ;; a nonzero digit:
-(define nzdigit "[1-9]")
+(define-RE nzdigit (chars [#\1 #\9]))
 
 ; delim:= (0x20)
 ;; a space
 (define delim " ")
+(define-RE delim-x " ")
 
 ; digit:= [(0x30)-(0x39) ]
 ;; a standard digit
@@ -177,6 +181,7 @@
 ;[ digit | digit + digit ]
 ;; one or two digits, with 2 digits only second can be zero (side condition stated in text)
 (define level "([0-9]|[1-9][0-9])")
+(define-RE level-x (or (chars digit) (cat nzdigit (chars digit))))
 
 
 ; non_at:=
@@ -187,10 +192,12 @@
 ;; also, this "print" should almost certainly be extended to cover all
 ;; unicode printing chars.
 (define non-at "[^@#_[:space:]]")
+(define-RE non-at-x (chars (complement "@#_" space)))
 
 
 ; pointer_char:= [ non_at ]
 (define pointer-char non-at)
+(define-RE pointer-char-x non-at-x)
 
 ; pointer_string:=
 ; [ null | pointer_char | pointer_string + pointer_char ]
@@ -199,6 +206,8 @@
 
 (define pointer-string
   (~a pointer-char "*"))
+(define-RE pointer-string-x
+  (repeat pointer-char-x))
 
 ; pointer:=
 ; (0x40) + alphanum + pointer_string + (0x40)
@@ -207,14 +216,18 @@
 
 (define pointer
   (~a "@([[:alnum:]]"pointer-string")@"))
+(define-RE pointer-x
+  (cat "@" (report (cat (chars alnum) pointer-string-x)) "@"))
 
 
 ; xref_ID:= pointer
 
 (define xref-id pointer)
+(define-RE xref-id-x pointer-x)
 
 ; optional_xref_ID:= xref_ID + delim
 (define opt-xref-id (~a xref-id delim))
+(define-RE opt-xref-id-x (cat xref-id-x delim-x))
 
 
 
@@ -282,7 +295,13 @@
 ;gedcom_line:=
 ;level + delim + [optional_xref_ID] + tag + [optional_line_value] + terminator
 (define gedcom-line
-  (pregexp (~a "^" level delim "("opt-xref-id")?" tag "("optional-line-value")?" "$")))
+  (px ^ (report level-x)
+      delim-x
+      ;; remove this use of report after refactoring?
+      (? opt-xref-id-x)
+      (inject "(_?[[:alnum:]]+)( (@([[:alnum:]][^@#_[:space:]]*)@|(@#((([^@]|@@))+)@ ((([^@]|@@))+)|@#((([^@]|@@))+)@|(([^@]|@@))+)))?$"))
+  #;(px ^ level-x delim-x (? opt-xref-id-x ) tag (? optional-line-value ) $)
+  #;(pregexp (~a "^" level delim "("opt-xref-id")?" tag "("optional-line-value")?" "$")))
 
 ;; A line that doesn't match the previous pattern
 ;; useful to prevent parsing breakage.
@@ -296,30 +315,29 @@
 (check-equal? (regexp-match gedcom-line "0 HEAD")
               '("0 HEAD"
                 "0" ;; level
-                #f ;; bogus
                 #f ;; xref name
                 "HEAD" ;; tag
                  #f ;; delim+line-value
                  #f ;; line-value
                  #f #f #f #f #f #f #f #f #f #f #f #f #f ;; oh dear heaven
                  ))
-(check-equal? (take (regexp-match gedcom-line "1 SOUR WikiTree.com") 7)
+(check-equal? (take (regexp-match gedcom-line "1 SOUR WikiTree.com") 6)
              '("1 SOUR WikiTree.com"
-               "1" #f #f
+               "1" #f
                    "SOUR"
                    " WikiTree.com"
                    "WikiTree.com"))
 
-(check-equal? (take (regexp-match gedcom-line "2 TYPE wikitree.page_id") 7)
+(check-equal? (take (regexp-match gedcom-line "2 TYPE wikitree.page_id") 6)
               '("2 TYPE wikitree.page_id"
-                "2" #f #f
+                "2" #f
                 "TYPE"
                 " wikitree.page_id"
                 "wikitree.page_id"))
 
-(check-equal? (take (regexp-match gedcom-line "1 FAMS @F9@") 7)
+(check-equal? (take (regexp-match gedcom-line "1 FAMS @F9@") 6)
               '("1 FAMS @F9@"
-                "1" #f #f
+                "1" #f
                 "FAMS"
                 " @F9@"
                 "@F9@"))
