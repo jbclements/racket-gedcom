@@ -236,6 +236,7 @@
 
 (define tag
   "(_?[[:alnum:]]+)")
+(define-RE tag-x (cat (? "_") (+ (chars alnum))))
 
 
 ; any_char:=
@@ -299,7 +300,10 @@
       delim-x
       ;; remove this use of report after refactoring?
       (? opt-xref-id-x)
-      (inject "(_?[[:alnum:]]+)( (@([[:alnum:]][^@#_[:space:]]*)@|(@#((([^@]|@@))+)@ ((([^@]|@@))+)|@#((([^@]|@@))+)@|(([^@]|@@))+)))?$"))
+      (report tag-x)
+      ;; outer report can probably go away
+      (? (report (inject " (@([[:alnum:]][^@#_[:space:]]*)@|(@#((([^@]|@@))+)@ ((([^@]|@@))+)|@#((([^@]|@@))+)@|(([^@]|@@))+))")))
+      $)
   #;(px ^ level-x delim-x (? opt-xref-id-x ) tag (? optional-line-value ) $)
   #;(pregexp (~a "^" level delim "("opt-xref-id")?" tag "("optional-line-value")?" "$")))
 
