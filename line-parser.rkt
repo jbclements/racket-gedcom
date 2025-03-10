@@ -118,10 +118,10 @@
                             (match line-text
                               [(regexp line-item-rx
                                        ;; unbelievably sensitive... (getting better)
-                                       (list _ _ #f #f #f #f str _ #f))
+                                       (list _ _ #f #f str))
                                (list 'escape str)]
                               [(regexp line-item-rx
-                                       (list _ _ str _ rest _ #f #f #f))
+                                       (list _ _ str rest #f))
                                (list 'escape-and-str str rest)])]
                            [else
                             (error 'parse-gedcom-line
@@ -229,8 +229,7 @@
 
 ;escape_text:=
 ; [ any_char | escape_text + any_char ]
-;; FIXME eliminate this report
-(define-RE escape-text (report (+ any-char)))
+(define-RE escape-text (+ any-char))
 
 ;; NB: the term "escape" here is used in a very different sense that I would expect.
 ;; specifically, it specifically allows an "extra tag" to be used to specify a
@@ -293,7 +292,7 @@
                 #f ;; xref name
                 "HEAD" ;; tag
                  #f ;; line-value
-                 #f #f #f #f #f #f #f #f #f ;; just for grouping...
+                 #f #f #f #f #f  ;; just for grouping...
                  ))
 (check-equal? (take (regexp-match gedcom-line "1 SOUR WikiTree.com") 5)
              '("1 SOUR WikiTree.com"
