@@ -116,12 +116,12 @@
                            [(regexp-match? escape-rx line-text)
                             ;;; sigh....
                             (match line-text
-                              [(regexp line-item-rx
+                              [(regexp escape-beginning-line-item-rx
                                        ;; unbelievably sensitive... (getting better)
-                                       (list _ _ #f #f str))
+                                       (list _ #f #f str))
                                (list 'escape str)]
-                              [(regexp line-item-rx
-                                       (list _ _ str rest #f))
+                              [(regexp escape-beginning-line-item-rx
+                                       (list _ str rest #f))
                                (list 'escape-and-str str rest)])]
                            [else
                             (error 'parse-gedcom-line
@@ -164,7 +164,7 @@
 ;; that the resulting regexp has a freakish number of submatches. Most of them
 ;; must be ignored. Ugh.
 
-;; 2025-03-09 This is all getting way way better with Ryan Culpepper's scramble:
+;; 2025-03-09 This has all gotten way way better with Ryan Culpepper's scramble. Yay!
 
 ;; a nonzero digit:
 (define-RE nzdigit (chars [#\1 #\9]))
@@ -237,7 +237,6 @@
 ; escape:=
 ; (0x40) + (0x23) + escape_text + (0x40)
 (define-RE escape
-  ;; FIXME elim report
   (cat "@#" (report escape-text) "@"))
 
 ;; line_text:= [ any_char | line_text + any_char ]
@@ -247,10 +246,13 @@
 ; [ escape | line_text | escape + delim + line_text ]
 
 (define-RE line-item
-  ;; FIXME eliminate this report and the other one
-  (report (or (cat escape delim (report line-text))
-              escape
-              line-text)))
+  (or (cat escape delim line-text)
+      escape
+      line-text))
+;; this is used to parse line-items known to begin with an escape
+(define-RE escape-beginning-line-item
+  (or (cat escape delim (report line-text))
+      escape))
 
 ;; this is important, to allow replacement of #f with "" later
 ;; in line parsing.
@@ -262,7 +264,7 @@
 
 ;; regexp wrappers
 
-(define line-item-rx (px ^ line-item))
+(define escape-beginning-line-item-rx (px ^ escape-beginning-line-item))
 (define pointer-rx (px ^ pointer))
 (define escape-rx (px ^ escape))
 
@@ -283,8 +285,6 @@
   (px ^ (report level) delim (report tag) delim (report (* (inject "."))) $))
 
 
-
-
 ;; should not fail to match....
 (check-equal? (regexp-match gedcom-line "0 HEAD")
               '("0 HEAD"
@@ -292,7 +292,7 @@
                 #f ;; xref name
                 "HEAD" ;; tag
                  #f ;; line-value
-                 #f #f #f #f #f  ;; just for grouping...
+                 #f #f #f ;; just for grouping...
                  ))
 (check-equal? (take (regexp-match gedcom-line "1 SOUR WikiTree.com") 5)
              '("1 SOUR WikiTree.com"
