@@ -5,7 +5,9 @@
          "shared.rkt"
          "line-parser.rkt")
 
-;; this parser is totally incomplete.
+(provide parse-gedcom)
+
+;; I am not at all certain that this parser is complete.
 
 ;; this parser is based on "GEDCOM 5.5.1 AE Revision 2",
 ;; downloaded from https://www.gedcom.org/gedcom.html
@@ -752,35 +754,29 @@ d Wright-23327 appear to represent the same person because: same person
 
 ;; LIVE:
 
-(define non-blank-lines (file-non-blank-lines "/Users/Clements/cfs/scanned-documents/genealogy/xc-no-text.ged"))
+(define (parse-gedcom gedcom-file)
+  (define non-blank-lines (file-non-blank-lines gedcom-file))
 
-(define repaired-lines (time (repair non-blank-lines)))
+  (define repaired-lines (time (repair non-blank-lines)))
 
-(define parsed-lines (parse-lines repaired-lines))
+  (define parsed-lines (parse-lines repaired-lines))
 
-(printf "RECORD PARSING...\n")
-(define d (time (parse-all-lines parsed-lines)))
+  (printf "RECORD PARSING...\n")
+  (define d (time (parse-all-lines parsed-lines)))
 
-(define errors2 (apply append (map check-record d)))
+  (define errors2 (apply append (map check-record d)))
 
-(printf "these are all believed to be wikitree gedcom bugs:\n")
-(printf "frequency of check-record errors:\n")
-(frequency-hash (map first errors2))
-(printf "frequency of too-empty tags:\n")
-(frequency-hash (map ged-record-tag
-                     (map second
-                          (filter (λ (e) (equal? (first e) 'too-empty)) errors2))))
+  (printf "these are all believed to be wikitree gedcom bugs:\n")
+  (printf "frequency of check-record errors:\n")
+  (frequency-hash (map first errors2))
+  (printf "frequency of too-empty tags:\n")
+  (frequency-hash (map ged-record-tag
+                       (map second
+                            (filter (λ (e) (equal? (first e) 'too-empty)) errors2))))
 
-(printf "file contains ~v top-level records\n"
-        (length d))
+  (printf "file contains ~v top-level records\n"
+          (length d))
 
   (pointer-integrity-check d)
 
-(define top-hash (records->hash d))
-
-
-
-(require racket/fasl)
-(call-with-output-file "/tmp/xc-tree.fasl"
-  (λ (port)
-    (s-exp->fasl top-hash port)))
+  (records->hash d))
