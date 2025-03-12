@@ -10,5 +10,10 @@ own peculiarities.
 
 Its most conspicuous omission at this point is a reasonably large GEDCOM
 file that it parses that's included in the repo; the problem here is
-that ... oh, you know, I should download a publicly available GEDCOM
-from wikitree, that would be pretty simple. Okay, next time...
+that these generated GEDCOM files appear to be copyrighted, and not legal
+to include in this distribution, which is painful; having a running
+example is more or less the first and best line of insurance for any
+piece of code.
+
+Take a look at example.rkt for a file that *would* work if I were allowed
+to include a gedcom file.

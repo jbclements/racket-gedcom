@@ -12,7 +12,7 @@
 ;; this parser is based on "GEDCOM 5.5.1 AE Revision 2",
 ;; downloaded from https://www.gedcom.org/gedcom.html
 
-;; it does successfully parse at least one GED file.
+;; it does successfully parse many GED files.
 
 ;; it uses racket regexps.
 
@@ -112,6 +112,7 @@
   (printf "long lines: ~v\n"
           (count (λ (l) (< 255 (string-length (second l)))) non-blank-lines))
 
+  ;; looks like this may no longer be necessary in 2025...
   (repair-comments non-blank-lines))
 
 ;; there's some serious breakage in and around these "Comment" objects.
@@ -119,6 +120,8 @@
 ;; way they pretty clearly should be. Ugh. They should be repaired with "CONT"
 ;; tags, I believe. Separate pass, bleah.
 
+;; UPDATE: on 2025-03-12, a test gedcom downloaded from wikitree does not appear
+;; to need this pass. Which is great! 
 (define (repair-comments lines)
   (cond
     [(empty? lines)
@@ -144,13 +147,8 @@
          (define line (first lines))
          (match (second line)
            [(regexp #px"^([0-9]{1,2}) (@[^@]+@ )?_?[A-Z]+( |$)" (list _ levelstr _ _))
-            (cond [(< (string->number levelstr) level)
-                   ;; looks like a real line, continue...
-                   (repair-comments lines)]
-                  [else
-                   (error 'repair-comments "probably an error here on line ~v: ~e"
-                          (first line)
-                          (second line))])]
+            ;; looks like a real line, continue...
+            (repair-comments lines)]
            [else
             (define next-level
               (cond [(equal? tag "CONT") level]
@@ -159,6 +157,28 @@
              (list (first line)
                    (~a level " " tag " " (second line)))
              (repair-comments/2a next-level "CONT" (rest lines)))])]))
+
+(check-equal?
+ (repair-comments
+  (list-with-indices
+   (regexp-split #px"\n"
+                 #<<|
+1 OBJE
+2 FORM Comment
+2 DATE 21 Oct 2021
+2 AUTH Gene Bivins
+2 TEXT Is there any documentation for the marriage of Allen Dryer and Bernice
+3 CONC  Borchert? Her dates are unknown; Allen was 23 when he married Molly W
+3 CONC heeler, and remained with her until his death at 67 years.
+|
+                 )))
+ '((0 "1 OBJE")
+   (1 "2 FORM Comment")
+   (2 "2 DATE 21 Oct 2021")
+   (3 "2 AUTH Gene Bivins")
+   (4 "2 TEXT Is there any documentation for the marriage of Allen Dryer and Bernice")
+   (5 "3 CONC  Borchert? Her dates are unknown; Allen was 23 when he married Molly W")
+   (6 "3 CONC heeler, and remained with her until his death at 67 years.")))
 
 (check-equal?
  (repair-comments
